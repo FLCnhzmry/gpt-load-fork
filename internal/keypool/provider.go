@@ -650,7 +650,16 @@ func (p *KeyProvider) SetKeyEnabled(keyID uint, enabled bool) (*models.APIKey, e
 		keyHashKey := fmt.Sprintf("key:%d", key.ID)
 		activeKeysListKey := fmt.Sprintf("group:%d:active_keys", key.GroupID)
 
-		if err := p.store.HSet(keyHashKey, p.apiKeyToMap(&key)); err != nil {
+		// 只写 enabled 字段，避免用 DB 快照整体覆盖 HASH。
+		// 上游自 v1.4.12 起以 store 中的 failure_count 为权威（先 HIncrBy，
+		// 落库时取 DB 与 store 的较大值），整体重写会把并发失败计数回写成旧值，
+		// 导致黑名单阈值判断被推迟。
+		updates := map[string]any{"enabled": enabled}
+		if existing, err := p.store.HGetAll(keyHashKey); err != nil || existing["id"] == "" {
+			// 缓存缺失或读取失败时回退为完整写入，避免生成残缺 HASH。
+			updates = p.apiKeyToMap(&key)
+		}
+		if err := p.store.HSet(keyHashKey, updates); err != nil {
 			return fmt.Errorf("failed to update key enabled flag in store: %w", err)
 		}
 
